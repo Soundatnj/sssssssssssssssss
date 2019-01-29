@@ -1,0 +1,615 @@
+<p>In this article, we will be creating a sample spring boot application with REST APIs exposed. These REST APIs will be secured with OAUTH2 protocol with JWT as a TokenStore. In the client side, we will be creating an angular 7 based application to consume the REST APIs. Hence, the angular application will first get the OAUTH2 authorization token from an AuthorizationServer and then consume the REST APIs to perform CRUD operation on a User entity. Here we will be using a MySQL database to read user credentials instead of in-memory authentication.</p>
+<p>In short, we will be creating a full stack app using Spring Boot OAUTH2 and Angular 7. Though the client is built is using Angular 7, the same is valid with other Angular versions such as Angular 5 and Angular 6. In my previous articles, we have already created multiple spring boot applications using OAUTH2. Hence, we will be re-using some of the components from it. You can visit this for all the <a href="https://www.devglan.com/tutorial/topics/spring-security">list on spring security applications</a> that we have built earlier. Also, you can visit this <a  href="https://www.devglan.com/angular/angular-7-crud-example">angular 7 CRUD app</a> to get started with Angular 7 app. </p>
+<p>Spring security OAUTH2 provides default token store but the implementation also provides functionality to define custom token store. Here, we will be using JwtTokenStore. <a href="https://www.devglan.com/spring-security/spring-boot-oauth2-jwt-example">Using JwtTokenStore as token provider</a> allows us to customize the token generated with TokenEnhancer to add additional claims.</p>
+<h2 class="st">What is OAuth2</h2>
+<p>OAuth 2 is an authorization framework that enables applications to obtain limited access to user accounts on an HTTP service, such as Facebook, GitHub, and DigitalOcean. It works by delegating user authentication to the service that hosts the user account, and authorizing third-party applications to access the user account. OAuth 2 provides authorization flows for web and desktop applications, and mobile devices.</p>
+<p><strong>OAuth2 Roles</strong></p>
+<p>OAuth2 provides 4 different roles.</p>
+<ul>
+<li><p><strong>Resource Owner</strong>: User</p></li>
+<li><p><strong>Client</strong>: Application</p></li>
+<li><p><strong>Resource Server</strong>: API</p></li>
+<li><p><strong>Authorization Server</strong>: API</p></li>
+</ul>
+<p><strong>OAuth2 Grant Types</strong></p>
+<p>Following are the 4 different grant types defined by OAuth2</p>
+<ul>
+<li><p><strong>Authorization Code</strong>: used with server-side Applications</p></li>
+<li><p><strong>Implicit</strong>: used with Mobile Apps or Web Applications (applications that run on the user's device)</p></li>
+<li><p><strong>Resource Owner Password Credentials</strong>: used with trusted Applications, such as those owned by the service itself</p></li>
+<li><p><strong>Client Credentials</strong>: used with Applications API access</p></li>
+</ul>
+<h2 class="st">OAuth2 Authorization Server Config</h2>
+<p>This class extends AuthorizationServerConfigurerAdapter and is responsible for generating tokens specific to a client.Suppose, if a user wants to login to devglan.com via facebook then facebook auth server will be generating tokens for Devglan.In this case, Devglan becomes the client which will be requesting for authorization code on behalf of user from facebook - the authorization server.</p>
+<p>Here, JwtAccessTokenConverter is the helper that translates between JWT encoded token values and OAuth authentication information. We have added our custom signature to make the JWT token more robust.Apart from JwtTokenStore, spring security also provides InMemoryTokenStore and JdbcTokenStore.</p>
+<p>Here, we are using in-memory credentials with client_id as devglan-client and CLIENT_SECRET as devglan-secret(bcrypted here in Spring Boot 2).But you are free to use JDBC implementation too.</p>
+<p><code>@EnableAuthorizationServer:</code> Enables an authorization server.AuthorizationServerEndpointsConfigurer defines the authorization and token endpoints and the token services.</p>
+<p>You can use this <a href="https://www.devglan.com/online-tools/bcrypt-hash-generator">tool to generate Bcrypt password with plain-text online</a>.</p>
+<b>AuthorizationServerConfig.java</b>
+<pre>
+<span class="antb">@Configuration</span>
+<span class="antb">@EnableAuthorizationServer</span>
+public class AuthorizationServerConfig extends AuthorizationServerConfigurerAdapter {
+
+	static final String CLIEN_ID = "devglan-client";
+	//static final String CLIENT_SECRET = "devglan-secret";
+	static final String CLIENT_SECRET ="$2a$04$e/c1/RfsWuThaWFCrcCuJeoyvwCV0URN/6Pn9ZFlrtIWaU/vj/BfG";
+	static final String GRANT_TYPE_PASSWORD = "password";
+	static final String AUTHORIZATION_CODE = "authorization_code";
+	static final String REFRESH_TOKEN = "refresh_token";
+	static final String IMPLICIT = "implicit";
+	static final String SCOPE_READ = "read";
+	static final String SCOPE_WRITE = "write";
+	static final String TRUST = "trust";
+	static final int ACCESS_TOKEN_VALIDITY_SECONDS = 1*60*60;
+	static final int FREFRESH_TOKEN_VALIDITY_SECONDS = 6*60*60;
+
+	@Autowired
+	private AuthenticationManager authenticationManager;
+
+	@Bean
+	public JwtAccessTokenConverter accessTokenConverter() {
+		JwtAccessTokenConverter converter = new JwtAccessTokenConverter();
+		converter.setSigningKey("as466gf");
+		return converter;
+	}
+
+	@Bean
+	public TokenStore tokenStore() {
+		return new JwtTokenStore(accessTokenConverter());
+	}
+
+	@Override
+	public void configure(ClientDetailsServiceConfigurer configurer) throws Exception {
+
+		configurer
+				.inMemory()
+				.withClient(CLIEN_ID)
+				.secret(CLIENT_SECRET)
+				.authorizedGrantTypes(GRANT_TYPE_PASSWORD, AUTHORIZATION_CODE, REFRESH_TOKEN, IMPLICIT )
+				.scopes(SCOPE_READ, SCOPE_WRITE, TRUST)
+				.accessTokenValiditySeconds(ACCESS_TOKEN_VALIDITY_SECONDS).
+				refreshTokenValiditySeconds(FREFRESH_TOKEN_VALIDITY_SECONDS);
+	}
+
+	@Override
+	public void configure(AuthorizationServerEndpointsConfigurer endpoints) {
+		endpoints.tokenStore(tokenStore())
+				.authenticationManager(authenticationManager)
+				.accessTokenConverter(accessTokenConverter());
+	}
+
+}
+</pre>
+<h2 class="st">Resource Server Config</h2>
+<p>Resource in our context is the REST API which we have exposed for the crud operation. To access these resources, the client must be authenticated. In real-time scenarios, whenever a user tries to access these resources, the user will be asked to provide his authenticity and once the user is authorized then he will be allowed to access these protected resources.</p>
+<p><code>resourceId</code> : the id for the resource (optional, but recommended and will be validated by the auth server if present).</p>
+<b>ResourceServerConfig.java</b>
+<pre>
+package com.devglan.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.oauth2.config.annotation.web.configuration.EnableResourceServer;
+import org.springframework.security.oauth2.config.annotation.web.configuration.ResourceServerConfigurerAdapter;
+import org.springframework.security.oauth2.config.annotation.web.configurers.ResourceServerSecurityConfigurer;
+import org.springframework.security.oauth2.provider.error.OAuth2AccessDeniedHandler;
+
+@Configuration
+@EnableResourceServer
+public class ResourceServerConfig extends ResourceServerConfigurerAdapter {
+
+	private static final String RESOURCE_ID = "resource_id";
+
+	@Override
+	public void configure(ResourceServerSecurityConfigurer resources) {
+		resources.resourceId(RESOURCE_ID).stateless(false);
+	}
+
+	@Override
+	public void configure(HttpSecurity http) throws Exception {
+        http.
+                anonymous().disable()
+                .authorizeRequests()
+                .antMatchers("/users/**").access("hasRole('ADMIN')")
+                .and().exceptionHandling().accessDeniedHandler(new OAuth2AccessDeniedHandler());
+	}
+
+}
+</pre>
+<h2 class="st">OAUTH2 Security Config</h2>
+<p>This class extends WebSecurityConfigurerAdapter and provides usual spring security configuration.Here, we are using bcrypt encoder to encode our passwords. You can try this online Bcrypt Tool to encode and match bcrypt passwords.Following configuration basically bootstraps the authorization server and resource server.</p>
+<p><code>@EnableWebSecurity</code> : Enables spring security web security support.</p>
+<p><code>@EnableGlobalMethodSecurity</code> : Support to have method level access control such as @PreAuthorize @PostAuthorize</p>
+<b>SecurityConfig.java</b>
+<pre>
+package com.devglan.config;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.oauth2.provider.ClientDetailsService;
+import org.springframework.security.oauth2.provider.approval.ApprovalStore;
+import org.springframework.security.oauth2.provider.approval.TokenApprovalStore;
+import org.springframework.security.oauth2.provider.approval.TokenStoreUserApprovalHandler;
+import org.springframework.security.oauth2.provider.request.DefaultOAuth2RequestFactory;
+import org.springframework.security.oauth2.provider.token.TokenStore;
+import org.springframework.security.oauth2.provider.token.store.InMemoryTokenStore;
+import org.springframework.security.oauth2.provider.token.store.JwtAccessTokenConverter;
+import org.springframework.security.oauth2.provider.token.store.JwtTokenStore;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
+
+import javax.annotation.Resource;
+
+@Configuration
+@EnableWebSecurity
+@EnableGlobalMethodSecurity(prePostEnabled = true)
+public class SecurityConfig extends WebSecurityConfigurerAdapter {
+
+    @Resource(name = "userService")
+    private UserDetailsService userDetailsService;
+
+    @Override
+    @Bean
+    public AuthenticationManager authenticationManagerBean() throws Exception {
+        return super.authenticationManagerBean();
+    }
+
+    @Autowired
+    public void globalUserDetails(AuthenticationManagerBuilder auth) throws Exception {
+        auth.userDetailsService(userDetailsService)
+                .passwordEncoder(encoder());
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+                .csrf().disable()
+                .anonymous().disable()
+                .authorizeRequests()
+                .antMatchers("/api-docs/**").permitAll();
+    }
+
+    @Bean
+    public BCryptPasswordEncoder encoder(){
+        return new BCryptPasswordEncoder();
+    }
+}
+
+</pre>
+<h2 class="st">REST APIs Implementation</h2>
+<p>Now let us define our controller class.</p>
+<b>UserController.java</b>
+<pre>
+@RestController
+@RequestMapping("/users")
+public class UserController {
+
+    @Autowired
+    private UserService userService;
+
+    @RequestMapping(value="/user", method = RequestMethod.GET)
+    public List<User> listUser(){
+        return userService.findAll();
+    }
+
+    @RequestMapping(value = "/user", method = RequestMethod.POST)
+    public User create(@RequestBody User user){
+        return userService.save(user);
+    }
+
+    @RequestMapping(value = "/user/{id}", method = RequestMethod.GET)
+    public User findOne(@PathVariable long id){
+        return userService.findOne(id);
+    }
+
+    @RequestMapping(value = "/user/{id}", method = RequestMethod.PUT)
+    public User update(@PathVariable long id, @RequestBody User user){
+        user.setId(id);
+        return userService.save(user);
+    }
+
+    @RequestMapping(value = "/user/{id}", method = RequestMethod.DELETE)
+    public void delete(@PathVariable(value = "id") Long id){
+        userService.delete(id);
+    }
+
+}
+</pre>
+<b>User.Java</b>
+<pre>
+@Entity
+public class User {
+
+    @Id
+    @GeneratedValue(strategy= GenerationType.IDENTITY)
+    private long id;
+    @Column
+    private String firstName;
+    @Column
+    private String lastName;
+    @Column
+    private String username;
+    @Column
+    @JsonIgnore
+    private String password;
+    @Column
+    private long salary;
+    @Column
+    private int age;
+
+	<span class="antb">//setters and getters</span>
+
+</pre>
+<b>application.properties</b>
+<pre>
+spring.datasource.url=jdbc:mysql://localhost:3306/test
+spring.datasource.username=root
+spring.datasource.password=root
+spring.jpa.show-sql=true
+spring.user.datasource.driver-class-name=com.mysql.jdbc.Driver
+</pre>
+<p>Below is the default script that can be used for first use.</p>
+<b>script.sql</b>
+<pre>
+create table user (id bigint not null auto_increment, age integer, first_name varchar(255), last_name varchar(255), password varchar(255), salary bigint, username varchar(255), primary key (id)) engine=MyISAM;
+INSERT INTO user (age, first_name, last_name,password,salary,username) values (23, 'admin', 'admin','$2a$04$EZzbSqieYfe/nFWfBWt2KeCdyq0UuDEM1ycFF8HzmlVR6sbsOnw7u',12345,'admin');
+
+</pre>
+<h2 class="st">Angular OAUTH2 Implementation</h2>
+<p>First we will be generating an Angular 7 app using <a href="https://cli.angular.io/" rel="noreferrer nofollow">angular cli</a> and then create different components for create, edit, add and delete user. The step by step demonstration of creating Angular 7 app can be found in my previous article here - <a href="https://www.devglan.com/angular/angular-7-crud-example">Angular 7 CRUD App</a>.Below is the project structure for the same.</p>
+img angular strucr
+<p>Below is the list of command that we have used to generate above project structure.</p>
+<pre>
+npm i npm@latest -g
+ng new my-dream-app
+cd my-dream-app
+ng serve
+ng g component login
+ng g component add-user
+ng g component edit-user
+ng g component list-user
+</pre>
+<h2 class="st">OAUTH2 Login In Angular</h2>
+<p>We have reactive forms defined. Once, the form is submitted, the endpoint at <code>oauth/token</code> will be hit to get the token. Below is the API details:</p>
+<pre>
+API Name - Login
+Method - POST
+URL - oauth/login
+Header - 'Authorization': 'Basic ' + btoa('devglan-client:devglan-secret')
+Body - {'username' :'admin ',
+      'password' :'admin',
+	'grant_type':  'password' }
+Content-type: application/x-www-form-urlencoded
+</pre>
+<b>login.component.html</b>
+<pre>
+<div class="row">
+
+  <div class="col-md-6 login-container">
+    <h2 style="margin: auto">Login </h2>
+    <form [formGroup]="loginForm" (ngSubmit)="onSubmit()">
+      <div class="form-group">
+        <label for="username">UserName:</label>
+        <input type="text" class="form-control" formControlName="username" id="username" autocomplete="off">
+        <div class="error" *ngIf="loginForm.controls['username'].hasError('required') && loginForm.controls['username'].touched">Username is required</div>
+      </div>
+      <div class="form-group">
+        <label for="pwd">Password:</label>
+        <input type="password" class="form-control" formControlName="password" id="pwd" autocomplete="off">
+        <div class="error" *ngIf="loginForm.controls['password'].hasError('required') && loginForm.controls['password'].touched">Password is required</div>
+      </div>
+      <button class="btn btn-success" [disabled]="loginForm.invalid">Login</button>
+      <div *ngIf="invalidLogin" class="error">
+        <div>Invalid credentials.</div>
+      </div>
+    </form>
+  </div>
+</div>
+
+</pre>
+<b>login.component.ts</b>
+<pre>
+export class LoginComponent implements OnInit {
+
+  loginForm: FormGroup;
+  invalidLogin: boolean = false;
+  constructor(private formBuilder: FormBuilder, private router: Router, private apiService: ApiService) { }
+
+  onSubmit() {
+    if (this.loginForm.invalid) {
+      return;
+    }
+    const body = new HttpParams()
+      .set('username', this.loginForm.controls.username.value)
+      .set('password', this.loginForm.controls.password.value)
+      .set('grant_type', 'password');
+
+    this.apiService.login(body.toString()).subscribe(data => {
+      window.sessionStorage.setItem('token', JSON.stringify(data));
+      console.log(window.sessionStorage.getItem('token'));
+      this.router.navigate(['list-user']);
+    }, error => {
+        alert(error.error.error_description)
+    });
+  }
+
+  ngOnInit() {
+    window.sessionStorage.removeItem('token');
+    this.loginForm = this.formBuilder.group({
+      username: ['', Validators.compose([Validators.required])],
+      password: ['', Validators.required]
+    });
+  }
+
+}
+
+</pre>
+login image
+<b>api.service.ts</b>
+<p>Check the login API here. This is exactly as per the API definition we defined above.</p>
+<pre>
+@Injectable()
+export class ApiService {
+
+  constructor(private http: HttpClient) { }
+  baseUrl: string = 'http://localhost:8080/users/';
+
+  login(loginPayload) {
+    const headers = {
+      'Authorization': 'Basic ' + btoa('devglan-client:devglan-secret'),
+      'Content-type': 'application/x-www-form-urlencoded'
+    }
+    return this.http.post('http://localhost:8080/' + 'oauth/token', loginPayload, {headers});
+  }
+
+  getUsers() {
+    return this.http.get(this.baseUrl + 'user?access_token=' + JSON.parse(window.sessionStorage.getItem('token')).access_token);
+  }
+
+  getUserById(id: number) {
+    return this.http.get(this.baseUrl + 'user/' + id + '?access_token=' + JSON.parse(window.sessionStorage.getItem('token')).access_token);
+  }
+
+  createUser(user: User){
+    return this.http.post<ApiResponse>(this.baseUrl + 'user?access_token=' + JSON.parse(window.sessionStorage.getItem('token')).access_token, user);
+  }
+
+  updateUser(user: User): Observable<ApiResponse> {
+    return this.http.put<ApiResponse>(this.baseUrl + 'user/' + user.id + '?access_token=' + JSON.parse(window.sessionStorage.getItem('token')).access_token, user);
+  }
+
+  deleteUser(id: number){
+    return this.http.delete<ApiResponse>(this.baseUrl + 'user/' + id + '?access_token=' + JSON.parse(window.sessionStorage.getItem('token')).access_token);
+  }
+}
+
+</pre>
+<p>We have the similar implementation to add and edit user. The implementation is very basic and do let me for any clarification required in the comment section below:</p>
+<p>After a successful login, list-user route will be loaded and getUsers() will be invoked that will load the list of users from the API and the user list will be shown in a tabular form. Each row will have a button to either update or delete any user entry. Add button will open a new form to add a new user. On click of the edit button, the selected user id will be cached in session storage and edit component will be loaded with user details auto populated from the DB. A click on delete button will instantly delete the user from DB and update the table.</p>
+<b>add-user.component.html</b>
+<pre>
+<div class="col-md-6 user-container">
+  <h2 class="text-center">Add User</h2>
+  <form [formGroup]="addForm" (ngSubmit)="onSubmit()">
+    <div class="form-group">
+      <label for="username">User Name:</label>
+      <input type="text" formControlName="username" placeholder="username" name="username" class="form-control" id="username">
+    </div>
+
+    <div class="form-group">
+      <label for="password">Password:</label>
+      <input type="password" formControlName="password" placeholder="password" name="password" class="form-control" id="password">
+    </div>
+
+    <div class="form-group">
+      <label for="firstName">First Name:</label>
+      <input formControlName="firstName" placeholder="First Name" name="firstName" class="form-control" id="firstName">
+    </div>
+
+    <div class="form-group">
+      <label for="lastName">Last Name:</label>
+      <input formControlName="lastName" placeholder="Last name" name="lastName" class="form-control" id="lastName">
+    </div>
+
+    <div class="form-group">
+      <label for="age">Age:</label>
+      <input type="number" formControlName="age" placeholder="age" name="age" class="form-control" id="age">
+    </div>
+
+    <div class="form-group">
+      <label for="salary">Salary:</label>
+      <input type="number" formControlName="salary" placeholder="salary" name="salary" class="form-control" id="salary">
+    </div>
+
+    <button class="btn btn-success">Update</button>
+  </form>
+</div>
+
+</pre>
+<b>add-user.component.ts</b>
+<pre>
+@Component({
+  selector: 'app-add-user',
+  templateUrl: './add-user.component.html',
+  styleUrls: ['./add-user.component.css']
+})
+export class AddUserComponent implements OnInit {
+
+  constructor(private formBuilder: FormBuilder,private router: Router, private apiService: ApiService) { }
+
+  addForm: FormGroup;
+
+  ngOnInit() {
+    this.addForm = this.formBuilder.group({
+      id: [],
+      username: ['', Validators.required],
+      password: ['', Validators.required],
+      firstName: ['', Validators.required],
+      lastName: ['', Validators.required],
+      age: ['', Validators.required],
+      salary: ['', Validators.required]
+    });
+
+  }
+
+  onSubmit() {
+    this.apiService.createUser(this.addForm.value)
+      .subscribe( data => {
+        this.router.navigate(['list-user']);
+      });
+  }
+
+}
+
+</pre>
+<b>edit-user.component.html</b>
+<pre>
+<div class="col-md-6 user-container">
+  <h2 class="text-center">Edit User</h2>
+  <form [formGroup]="editForm" (ngSubmit)="onSubmit()">
+    <div class="hidden">
+      <input type="text" formControlName="id" placeholder="id" name="id" class="form-control" id="id">
+    </div>
+    <div class="form-group">
+      <label for="username">User Name:</label>
+      <input type="text" formControlName="username" placeholder="username" name="username" class="form-control" id="username" readonly="true">
+    </div>
+
+    <div class="form-group">
+      <label for="firstName">First Name:</label>
+      <input formControlName="firstName" placeholder="First Name" name="firstName" class="form-control" id="firstName">
+    </div>
+
+    <div class="form-group">
+      <label for="lastName">Last Name:</label>
+      <input formControlName="lastName" placeholder="Last name" name="lastName" class="form-control" id="lastName">
+    </div>
+
+    <div class="form-group">
+      <label for="age">Age:</label>
+      <input type="number" formControlName="age" placeholder="age" name="age" class="form-control" id="age">
+    </div>
+
+    <div class="form-group">
+      <label for="salary">Salary:</label>
+      <input type="number" formControlName="salary" placeholder="salary" name="salary" class="form-control" id="salary">
+    </div>
+
+    <button class="btn btn-success">Update</button>
+  </form>
+</div>
+
+</pre>
+<b>edit-user.component.ts</b>
+<pre>
+export class EditUserComponent implements OnInit {
+
+  user: User;
+  editForm: FormGroup;
+  constructor(private formBuilder: FormBuilder,private router: Router, private apiService: ApiService) { }
+
+  ngOnInit() {
+    let userId = window.sessionStorage.getItem("editUserId");
+    if(!userId) {
+      alert("Invalid action.")
+      this.router.navigate(['list-user']);
+      return;
+    }
+    this.editForm = this.formBuilder.group({
+      id: [''],
+      username: ['', Validators.required],
+      firstName: ['', Validators.required],
+      lastName: ['', Validators.required],
+      age: ['', Validators.required],
+      salary: ['', Validators.required]
+    });
+    this.apiService.getUserById(+userId)
+      .subscribe( data => {
+        this.editForm.setValue(data);
+      });
+  }
+
+  onSubmit() {
+    this.apiService.updateUser(this.editForm.value)
+      .pipe(first())
+      .subscribe(
+        data => {
+            alert('User updated successfully.');
+            this.router.navigate(['list-user']);
+        },
+        error => {
+          alert(error);
+        });
+  }
+
+}
+
+</pre>
+<p>Following is our angular module and routing configuration.</p>
+<b>app.module.ts</b>
+<pre>
+import { BrowserModule } from '@angular/platform-browser';
+import { NgModule } from '@angular/core';
+
+import { AppComponent } from './app.component';
+import { LoginComponent } from './login/login.component';
+import { AddUserComponent } from './add-user/add-user.component';
+import { EditUserComponent } from './edit-user/edit-user.component';
+import { ListUserComponent } from './list-user/list-user.component';
+import {ApiService} from "./core/api.service";
+import {HttpClientModule} from "@angular/common/http";
+import {ReactiveFormsModule} from "@angular/forms";
+import {routing} from "./app.routing";
+
+@NgModule({
+  declarations: [
+    AppComponent,
+    LoginComponent,
+    AddUserComponent,
+    EditUserComponent,
+    ListUserComponent
+  ],
+  imports: [
+    BrowserModule,
+    routing,
+    ReactiveFormsModule,
+    HttpClientModule
+  ],
+  providers: [ApiService],
+  bootstrap: [AppComponent]
+})
+export class AppModule { }
+
+</pre>
+<b>app.routing.ts</b>
+<pre>
+import { RouterModule, Routes } from '@angular/router';
+import {LoginComponent} from "./login/login.component";
+import {AddUserComponent} from "./add-user/add-user.component";
+import {ListUserComponent} from "./list-user/list-user.component";
+import {EditUserComponent} from "./edit-user/edit-user.component";
+
+const routes: Routes = [
+  { path: 'login', component: LoginComponent },
+  { path: 'add-user', component: AddUserComponent },
+  { path: 'list-user', component: ListUserComponent },
+  { path: 'edit-user', component: EditUserComponent },
+  {path : '', component : LoginComponent}
+];
+
+export const routing = RouterModule.forRoot(routes);
+</pre>
+<h2 class="st">Conclusion</h2>
+<p>In this article, we discussed about implementing Spring Boot OAUTH2 with Angular application. We configured our authorization server and resource server using OAUTH2 and secured our REST APIs. The same REST APIs was accesses with angular client after generating JWT OAUTH token.</p>
